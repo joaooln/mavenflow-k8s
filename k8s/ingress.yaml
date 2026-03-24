@@ -1,0 +1,38 @@
+---
+# IngressRoute para Traefik v2/v3
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: mavenflow
+  namespace: mavenflow
+spec:
+  entryPoints:
+    - web        # HTTP
+    # - websecure  # descomente para HTTPS (requer cert-manager ou TLS manual)
+  routes:
+    # API REST + WebSocket — prefixo /api e /ws roteiam para o backend
+    - match: PathPrefix(`/api`) || PathPrefix(`/ws`)
+      kind: Rule
+      services:
+        - name: mavenflow-api
+          port: 3001
+      # WebSocket precisa de upgrade de protocolo
+      middlewares:
+        - name: ws-headers
+    # Frontend SPA — tudo o mais vai para o Nginx
+    - match: PathPrefix(`/`)
+      kind: Rule
+      services:
+        - name: mavenflow-frontend
+          port: 80
+---
+# Middleware para suporte a WebSocket
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: ws-headers
+  namespace: mavenflow
+spec:
+  headers:
+    customRequestHeaders:
+      X-Forwarded-Proto: "http"

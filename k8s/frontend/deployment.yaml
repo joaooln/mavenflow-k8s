@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mavenflow-frontend
+  namespace: mavenflow
+  labels:
+    app: mavenflow-frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mavenflow-frontend
+  template:
+    metadata:
+      labels:
+        app: mavenflow-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: your-registry/mavenflow-frontend:latest  # substitua pelo seu registry
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "100m"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 3
+            periodSeconds: 5

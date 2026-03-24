@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mavenflow-frontend
+  namespace: mavenflow
+spec:
+  selector:
+    app: mavenflow-frontend
+  ports:
+    - port: 80
+      targetPort: 80
+  type: ClusterIP
