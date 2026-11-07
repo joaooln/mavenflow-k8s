@@ -18,10 +18,10 @@ resources:
 images:
 - name: mavenflow-api
   newName: ghcr.io/joaooln/mavenflow-k8s-api
-  newTag: 1cddfb36a9062b8fd6d312bed71ee8e145fe5d60
+  newTag: b693321e5921d33feec9d222d11d9ca702d189c3
 - name: mavenflow-frontend
   newName: ghcr.io/joaooln/mavenflow-k8s-frontend
-  newTag: 1cddfb36a9062b8fd6d312bed71ee8e145fe5d60
+  newTag: b693321e5921d33feec9d222d11d9ca702d189c3
 
 patches:
 - patch: |-
