@@ -1,4 +1,4 @@
-import 'dotenv/config' assert { type: 'json' };
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import { createServer } from 'http';
