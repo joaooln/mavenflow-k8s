@@ -1,0 +1,22 @@
+# Traefik v3 IngressRoute: /api and /ws go to the API (WebSocket upgrade is
+# handled natively by Traefik), everything else to the SPA.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: mavenflow
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`mavenflow.example.com`) && (PathPrefix(`/api`) || PathPrefix(`/ws`))
+      kind: Rule
+      services:
+        - name: mavenflow-api
+          port: 3001
+    - match: Host(`mavenflow.example.com`)
+      kind: Rule
+      services:
+        - name: mavenflow-frontend
+          port: 80
+  tls:
+    certResolver: letsencrypt

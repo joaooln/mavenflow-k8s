@@ -2,343 +2,138 @@
 
 # Mavenflow
 
-**Gerenciador de projetos e tarefas colaborativo — inspirado no Trello**
+**Real-time Kanban project manager, deployed on Kubernetes with GitOps**
 
-[![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=white)](https://react.dev)
-[![Node.js](https://img.shields.io/badge/Node.js-22-339933?style=flat-square&logo=node.js&logoColor=white)](https://nodejs.org)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat-square&logo=postgresql&logoColor=white)](https://postgresql.org)
-[![Kubernetes](https://img.shields.io/badge/Kubernetes-on--prem-326CE5?style=flat-square&logo=kubernetes&logoColor=white)](https://kubernetes.io)
-[![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
+[![CI](https://github.com/joaooln/mavenflow-k8s/actions/workflows/ci.yml/badge.svg)](https://github.com/joaooln/mavenflow-k8s/actions/workflows/ci.yml)
+![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=white)
+![Node.js](https://img.shields.io/badge/Node.js-22-339933?style=flat-square&logo=node.js&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat-square&logo=postgresql&logoColor=white)
+![Kubernetes](https://img.shields.io/badge/Kubernetes-Kustomize-326CE5?style=flat-square&logo=kubernetes&logoColor=white)
+![Argo CD](https://img.shields.io/badge/GitOps-Argo%20CD-EF7B4D?style=flat-square&logo=argo&logoColor=white)
 
 </div>
 
----
+A Trello-style app (boards, cards, checklists, comments, real-time updates over WebSockets),
+used here as a realistic three-tier workload to practice **Kubernetes operations and GitOps**:
+Kustomize environments, a PostgreSQL StatefulSet, hardened pods, an end-to-end test on a real
+cluster in CI, and Argo CD deploying whatever is on `main`.
 
-## Sobre
+## How a change reaches production
 
-Mavenflow é uma aplicação web full-stack de gerenciamento de projetos com boards Kanban, colaboração em tempo real via WebSockets e controle de acesso por board. Projetado para rodar on-premises em Kubernetes com Traefik como ingress controller.
-
----
-
-## Arquitetura
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Cluster Kubernetes                        │
-│                        namespace: mavenflow                      │
-│                                                                  │
-│   ┌──────────┐     ┌─────────────────────────────────────────┐  │
-│   │  Traefik │────▶│           IngressRoute                   │  │
-│   │ (ingress)│     │  /api  ──▶  mavenflow-api:3001           │  │
-│   └──────────┘     │  /ws   ──▶  mavenflow-api:3001 (WS)     │  │
-│                    │  /     ──▶  mavenflow-frontend:80        │  │
-│                    └─────────────────────────────────────────┘  │
-│                                                                  │
-│   ┌────────────────┐   ┌───────────────┐   ┌─────────────────┐  │
-│   │    Frontend    │   │      API      │   │   PostgreSQL    │  │
-│   │  nginx:alpine  │   │  Node.js 22   │   │   v16 + PVC     │  │
-│   │  React 19 SPA  │   │  Express +    │   │   5 Gi RWO      │  │
-│   │  2 réplicas    │   │  WebSocket    │   │   1 réplica     │  │
-│   └────────────────┘   │  2 réplicas   │   └─────────────────┘  │
-│                        └───────────────┘                         │
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+  dev[git push] --> ci[GitHub Actions]
+  subgraph CI["CI (every push / PR)"]
+    ci --> fe[frontend build]
+    ci --> api[API smoke test<br/>vs PostgreSQL service]
+    ci --> man[kustomize build<br/>+ kubeconform]
+    fe & api & man --> e2e[kind cluster:<br/>deploy dev overlay<br/>+ end-to-end test]
+  end
+  e2e --> rel[push images to GHCR<br/>tag = commit SHA]
+  rel --> bump[CI commits new tag to<br/>deploy/overlays/prod]
+  bump --> argo[Argo CD detects the change<br/>and syncs the cluster]
+  argo --> k8s[(Kubernetes<br/>namespace mavenflow)]
 ```
 
-### Fluxo de dados
+Git is the single source of truth: nobody runs `kubectl apply` against production. Argo CD
+applies the prod overlay, prunes removed resources and reverts manual drift (`selfHeal`).
+
+## Runtime architecture
+
+```mermaid
+flowchart LR
+  user((Browser)) -->|HTTPS| traefik[Traefik IngressRoute]
+  traefik -->|/| fe[frontend<br/>nginx-unprivileged · SPA]
+  traefik -->|/api, /ws| api[API<br/>Node 22 · Express · WebSocket<br/>HPA 2-6 · PDB]
+  api -->|NetworkPolicy:<br/>only API → DB| db[(PostgreSQL 16<br/>StatefulSet + PVC)]
+```
+
+## Kubernetes design
+
+| Concern | Implementation |
+| --- | --- |
+| Environments | Kustomize `base` + `overlays/dev` (kind/CI) and `overlays/prod` (Argo CD) |
+| Database | PostgreSQL **StatefulSet** with `volumeClaimTemplates` and a headless Service |
+| Startup order | API `initContainer` waits for `pg_isready` before the app starts |
+| Health | Readiness/liveness probes on every workload (`/api/health`, `/healthz`, `pg_isready`) |
+| Availability | 2 replicas, `PodDisruptionBudget`, HPA on CPU in prod |
+| Security | Non-root containers, `readOnlyRootFilesystem` on the API, all capabilities dropped, seccomp `RuntimeDefault`, no service account token, NetworkPolicy isolating the database |
+| Secrets | Dev uses throwaway `secretGenerator` values; prod expects **Sealed Secrets** (nothing sensitive in Git) |
+| Delivery | Images tagged with the commit SHA; CI bumps the prod overlay, Argo CD syncs it |
+
+## Repository layout
 
 ```
-Browser
-  │
-  ├── REST  HTTP/HTTPS  ──▶  /api/*  ──▶  Express Routes  ──▶  PostgreSQL
-  │                                                │
-  └── WebSocket  ws(s)://  ──▶  /ws?token=JWT     │
-           │                         │             │
-           │   board:update ◀────────┤  broadcastBoardUpdate()
-           │   notification ◀────────┘  pushNotification(userId)
+backend/                  Express API + WebSocket server (Node 22)
+src/                      React 19 SPA (Vite)
+deploy/
+  base/                   postgres.yaml · api.yaml · frontend.yaml · networkpolicy.yaml
+  overlays/dev/           kind/CI: dev secrets, 1 replica, local images
+  overlays/prod/          Traefik IngressRoute, HPA, GHCR images (tag bumped by CI)
+gitops/argocd/            Argo CD Application pointing at overlays/prod
+scripts/smoke-test.sh     register → login → create board → list boards
+.github/workflows/ci.yml  build, smoke test, manifest validation, kind e2e, release
 ```
 
----
+## Run it
 
-## Funcionalidades
-
-### Autenticação
-- Cadastro e login com e-mail + senha (bcrypt + JWT 7 dias)
-- Sessão restaurada automaticamente via token no `localStorage`
-- Logout com invalidação local do token
-
-### Boards e Controle de Acesso
-- Crie boards com backgrounds customizáveis (cores/gradientes)
-- Convide membros por e-mail — notificação em tempo real ao convidado
-- Papéis: **owner** (criador) e **member**
-- Somente membros do board acessam seus dados
-
-### Cards (Kanban e Lista)
-- Modo **Kanban** com drag-and-drop entre colunas
-- Modo **Lista** compacto
-- Crie, reordene e mova cards entre colunas
-
-### Detalhe do Card
-- Título e descrição editáveis inline
-- Labels coloridas por board (criar/renomear/excluir)
-- Membros com avatar e cor
-- Data de vencimento com indicadores visuais
-- Checklists com barra de progresso
-- Comentários com histórico — notifica membros do card em tempo real
-- Log de atividade automático
-- Arquivar / restaurar sem excluir
-
-### Colaboração em Tempo Real
-- Qualquer alteração num board (card movido, criado, editado) é propagada imediatamente para todos os membros conectados via WebSocket
-- Notificações push: convite para board, atribuição a card, novo comentário
-- Painel de notificações na TopBar com contador de não lidas
-
-### Dashboard
-- Saudação personalizada com período do dia
-- Estatísticas: boards, cards totais, concluídos, atrasados
-- Cards vencendo nos próximos 7 dias
-- Progresso por board
-- Feed de atividade recente
-
----
-
-## Stack
-
-### Frontend
-
-| Tecnologia | Versão | Uso |
-|---|---|---|
-| [React](https://react.dev) | 19 | Framework UI |
-| [Vite](https://vitejs.dev) | 8 | Build + dev server |
-| [@dnd-kit](https://dndkit.com) | 6/10 | Drag-and-drop |
-| [Lucide React](https://lucide.dev) | latest | Ícones SVG |
-| CSS puro + custom properties | — | Estilização |
-
-### Backend
-
-| Tecnologia | Versão | Uso |
-|---|---|---|
-| [Node.js](https://nodejs.org) | 22 | Runtime |
-| [Express](https://expressjs.com) | 5 | REST API |
-| [ws](https://github.com/websockets/ws) | 8 | WebSocket server |
-| [PostgreSQL](https://postgresql.org) | 16 | Banco de dados |
-| [pg](https://node-postgres.com) | 8 | Driver PostgreSQL |
-| [jsonwebtoken](https://github.com/auth0/node-jsonwebtoken) | 9 | JWT auth |
-| [bcryptjs](https://github.com/dcodeIO/bcrypt.js) | 3 | Hash de senhas |
-
-### Infraestrutura
-
-| Componente | Tecnologia |
-|---|---|
-| Container runtime | Docker (multi-stage build) |
-| Orquestração | Kubernetes (on-premises) |
-| Ingress controller | Traefik v2/v3 (IngressRoute CRD) |
-| Namespace | `mavenflow` |
-| Persistência | PersistentVolumeClaim 5Gi (PostgreSQL) |
-
----
-
-## Desenvolvimento local
-
-### Pré-requisitos
-
-- Node.js 22+
-- Docker e Docker Compose
-
-### Subir com Docker Compose
+**Docker Compose**
 
 ```bash
-# Clone o repositório
-git clone https://github.com/joaooln/mavenflow-k8s.git
-cd mavenflow-k8s
-
-# Copie e edite as variáveis de ambiente
-cp backend/.env.example backend/.env
-
-# Suba todos os serviços
-docker compose up --build
+docker compose up --build        # http://localhost:8080 (API on :3001)
 ```
 
-| Serviço | Endereço |
-|---|---|
-| Frontend | http://localhost:3000 |
-| API | http://localhost:3001 |
-| PostgreSQL | localhost:5432 |
-
-### Desenvolvimento sem Docker
+**Local Kubernetes (kind)**
 
 ```bash
-# Frontend
-npm install
-npm run dev          # http://localhost:5173
-
-# Backend (em outro terminal)
-cd backend
-npm install
-# configure backend/.env com DATABASE_URL e JWT_SECRET
-node src/app.js      # http://localhost:3001
+kind create cluster
+docker build -t mavenflow-api:dev backend && docker build -t mavenflow-frontend:dev .
+kind load docker-image mavenflow-api:dev mavenflow-frontend:dev
+kubectl apply -k deploy/overlays/dev
+kubectl -n mavenflow-dev port-forward svc/mavenflow-frontend 8080:80
 ```
 
-### Variáveis de ambiente do backend
-
-```env
-PORT=3001
-DATABASE_URL=postgresql://mavenflow:senha@localhost:5432/mavenflow
-JWT_SECRET=sua_chave_secreta_longa
-CORS_ORIGIN=http://localhost:5173
-```
-
----
-
-## Deploy em Kubernetes
-
-### Pré-requisitos
-
-- Cluster Kubernetes com Traefik como ingress controller
-- `kubectl` configurado apontando para o cluster
-- Imagens publicadas em um registry acessível ao cluster
-
-### 1. Build e push das imagens
+**Production with Argo CD**
 
 ```bash
-# Frontend
-docker build -t seu-registry/mavenflow-frontend:latest .
-docker push seu-registry/mavenflow-frontend:latest
-
-# Backend
-docker build -t seu-registry/mavenflow-api:latest ./backend
-docker push seu-registry/mavenflow-api:latest
+kubectl apply -n argocd -f gitops/argocd/application.yaml
 ```
 
-### 2. Configurar secrets
+## Secrets
 
-Edite os secrets com seus valores reais (base64):
+Production secrets are encrypted with [Sealed Secrets](https://github.com/bitnami-labs/sealed-secrets)
+so they can live in Git safely:
 
 ```bash
-# Gerar valores base64
-echo -n "sua_senha_postgres" | base64
-echo -n "sua_chave_jwt_longa_e_aleatoria" | base64
+kubectl -n mavenflow create secret generic mavenflow-db \
+  --from-literal=password="$(openssl rand -hex 24)" --dry-run=client -o yaml \
+  | kubeseal -o yaml > deploy/overlays/prod/sealed-secrets.yaml
+kubectl -n mavenflow create secret generic mavenflow-api \
+  --from-literal=jwt-secret="$(openssl rand -hex 32)" --dry-run=client -o yaml \
+  | kubeseal -o yaml >> deploy/overlays/prod/sealed-secrets.yaml
+# then uncomment `sealed-secrets.yaml` in deploy/overlays/prod/kustomization.yaml
 ```
 
-Atualize `k8s/postgres/secret.yaml` e `k8s/api/secret.yaml` com os valores gerados.
+## Application features
 
-### 3. Aplicar os manifests
+- Email/password auth (bcrypt + JWT), per-board access control (owner / member)
+- Kanban and list views with drag and drop
+- Cards with labels, members, due dates, checklists, comments and activity log
+- Real-time board updates and notifications over WebSockets
+- Dashboard with overdue / upcoming cards and per-board progress
 
-```bash
-# Namespace primeiro
-kubectl apply -f k8s/namespace.yaml
+## Lessons learned
 
-# PostgreSQL
-kubectl apply -f k8s/postgres/
+- The API crashed on start in Node 22 (`import ... assert {}` syntax was removed). The kind
+  end-to-end test in CI now catches this class of bug before anything ships.
+- WebSockets must switch to `wss://` behind HTTPS; the client now derives it from the page protocol.
 
-# API
-kubectl apply -f k8s/api/
+## Roadmap
 
-# Frontend
-kubectl apply -f k8s/frontend/
+- [ ] Frontend lint clean-up and unit tests
+- [ ] Database backups with a CronJob (`pg_dump` to object storage)
+- [ ] Prometheus metrics and alerts for the API
 
-# Ingress (Traefik IngressRoute)
-kubectl apply -f k8s/ingress.yaml
-```
+## License
 
-### 4. Verificar deploy
-
-```bash
-kubectl -n mavenflow get pods
-kubectl -n mavenflow get ingress
-kubectl -n mavenflow logs -l app=mavenflow-api
-```
-
-### Estrutura dos manifests
-
-```
-k8s/
-├── namespace.yaml
-├── ingress.yaml              # Traefik IngressRoute + Middleware WS
-├── postgres/
-│   ├── secret.yaml           # POSTGRES_USER, PASSWORD, DB
-│   ├── pvc.yaml              # 5Gi ReadWriteOnce
-│   ├── deployment.yaml       # Recreate strategy, health checks
-│   └── service.yaml          # ClusterIP :5432
-├── api/
-│   ├── secret.yaml           # DB_PASSWORD, JWT_SECRET
-│   ├── configmap.yaml        # DB_HOST, CORS_ORIGIN, PORT
-│   ├── deployment.yaml       # 2 réplicas, readiness /api/health
-│   └── service.yaml          # ClusterIP :3001
-└── frontend/
-    ├── deployment.yaml       # 2 réplicas, nginx SPA
-    └── service.yaml          # ClusterIP :80
-```
-
----
-
-## Estrutura do projeto
-
-```
-mavenflow-k8s/
-├── src/                          # Frontend React
-│   ├── api/
-│   │   ├── client.js             # Fetch base com JWT header
-│   │   ├── auth.js               # register, login, logout, getMe
-│   │   ├── boards.js             # CRUD boards, columns, cards, labels
-│   │   └── notifications.js      # Listar, marcar lida
-│   ├── contexts/
-│   │   └── AuthContext.jsx       # Estado global de autenticação
-│   ├── hooks/
-│   │   └── useWebSocket.js       # Conexão WS + auto-reconnect
-│   ├── components/
-│   │   ├── CardDetailModal.jsx   # Modal completo do card
-│   │   ├── Sidebar.jsx           # Navegação lateral
-│   │   ├── TopBar.jsx            # Barra superior + notificações
-│   │   └── UserProfileModal.jsx  # Edição de perfil
-│   ├── views/
-│   │   ├── LoginView.jsx         # Tela de login/cadastro
-│   │   ├── DashboardView.jsx     # Estatísticas e atividade
-│   │   ├── BoardsHomeView.jsx    # Grid de boards
-│   │   └── BoardView.jsx         # Kanban/Lista com filtros
-│   └── App.jsx                   # Roteamento + estado global
-│
-├── backend/                      # API Node.js
-│   ├── src/
-│   │   ├── app.js                # Entry point, Express + WS server
-│   │   ├── db/
-│   │   │   ├── schema.sql        # Schema PostgreSQL completo
-│   │   │   └── index.js          # Pool + getBoardFull()
-│   │   ├── middleware/
-│   │   │   └── auth.js           # JWT + requireBoardMember/Owner
-│   │   ├── routes/
-│   │   │   ├── auth.js           # POST /register, /login
-│   │   │   ├── users.js          # GET/PUT /me, GET /search
-│   │   │   ├── boards.js         # CRUD boards + membros
-│   │   │   ├── columns.js        # CRUD colunas
-│   │   │   ├── cards.js          # CRUD cards + move + archive
-│   │   │   ├── labels.js         # CRUD labels por board
-│   │   │   ├── checklists.js     # CRUD checklists + itens
-│   │   │   ├── comments.js       # Comentários + notificações
-│   │   │   └── notifications.js  # Listar + marcar lida
-│   │   └── websocket/
-│   │       └── index.js          # Salas por board + push por userId
-│   ├── Dockerfile
-│   └── .env.example
-│
-├── k8s/                          # Manifests Kubernetes
-├── Dockerfile                    # Frontend multi-stage
-├── nginx.conf                    # SPA fallback + gzip + cache
-├── docker-compose.yml            # Dev local completo
-└── README.md
-```
-
----
-
-## Schema do banco
-
-O schema cobre 13 tabelas com UUID como PK em todas:
-
-`users` · `boards` · `board_members` · `labels` · `columns` · `cards` · `card_labels` · `card_members` · `checklists` · `checklist_items` · `comments` · `activity` · `notifications`
-
-O backend aplica o schema automaticamente na inicialização via `initSchema()`.
-
----
-
-## Licença
-
-MIT © [João](https://github.com/joaooln)
+MIT

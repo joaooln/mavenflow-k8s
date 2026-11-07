@@ -1,0 +1,40 @@
+# Local / CI environment (kind). Secrets here are throwaway dev values.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: mavenflow-dev
+
+resources:
+  - namespace.yaml
+  - ../../base
+
+images:
+  - name: mavenflow-api
+    newName: mavenflow-api
+    newTag: dev
+  - name: mavenflow-frontend
+    newName: mavenflow-frontend
+    newTag: dev
+
+secretGenerator:
+  - name: mavenflow-db
+    literals:
+      - password=dev-only-password
+  - name: mavenflow-api
+    literals:
+      - jwt-secret=dev-only-jwt-secret
+
+replicas:
+  - name: mavenflow-api
+    count: 1
+  - name: mavenflow-frontend
+    count: 1
+
+patches:
+  - target:
+      kind: StatefulSet
+      name: postgres
+    patch: |-
+      - op: replace
+        path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
+        value: 1Gi

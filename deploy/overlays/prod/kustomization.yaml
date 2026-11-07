@@ -1,0 +1,33 @@
+# Production environment, deployed by Argo CD (see gitops/argocd).
+# Image tags are bumped automatically by CI on every push to main.
+#
+# Secrets are NOT stored here in plain text. Create them as SealedSecrets
+# (see README "Secrets") and add the generated file to `resources`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: mavenflow
+
+resources:
+  - namespace.yaml
+  - ../../base
+  - ingressroute.yaml
+  - hpa.yaml
+  # - sealed-secrets.yaml
+
+images:
+  - name: mavenflow-api
+    newName: ghcr.io/joaooln/mavenflow-k8s-api
+    newTag: latest
+  - name: mavenflow-frontend
+    newName: ghcr.io/joaooln/mavenflow-k8s-frontend
+    newTag: latest
+
+patches:
+  - target:
+      kind: ConfigMap
+      name: mavenflow-api
+    patch: |-
+      - op: replace
+        path: /data/CORS_ORIGIN
+        value: https://mavenflow.example.com

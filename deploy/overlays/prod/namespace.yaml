@@ -2,5 +2,3 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: mavenflow
-  labels:
-    app.kubernetes.io/name: mavenflow

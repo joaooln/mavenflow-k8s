@@ -1,0 +1,28 @@
+# Argo CD watches deploy/overlays/prod on main and keeps the cluster in sync.
+# kubectl apply -n argocd -f gitops/argocd/application.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mavenflow
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/joaooln/mavenflow-k8s.git
+    targetRevision: main
+    path: deploy/overlays/prod
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mavenflow
+  syncPolicy:
+    automated:
+      prune: true     # delete resources removed from Git
+      selfHeal: true  # revert manual changes made in the cluster
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

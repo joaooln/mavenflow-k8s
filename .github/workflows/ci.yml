@@ -1,0 +1,151 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+  api:
+    name: API smoke test (PostgreSQL service)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: mavenflow
+          POSTGRES_USER: mavenflow
+          POSTGRES_PASSWORD: ci-password
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U mavenflow" --health-interval 5s --health-retries 10
+    env:
+      DB_HOST: localhost
+      DB_PASSWORD: ci-password
+      JWT_SECRET: ci-jwt-secret
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - name: Start API
+        run: |
+          node src/app.js > /tmp/api.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf localhost:3001/api/health && break; sleep 1; done
+      - name: Register, log in and create a board
+        run: ../scripts/smoke-test.sh http://localhost:3001
+      - name: API logs
+        if: always()
+        run: cat /tmp/api.log
+
+  manifests:
+    name: Kustomize build & schema validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install kubeconform
+        run: curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
+      - name: Validate overlays
+        run: |
+          for env in dev prod; do
+            echo "== $env"
+            kubectl kustomize "deploy/overlays/$env" | ./kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.31.0
+          done
+
+  e2e:
+    name: Deploy to kind & end-to-end test
+    needs: [frontend, api, manifests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: ci
+      - name: Build images and load them into kind
+        run: |
+          docker build -t mavenflow-api:dev backend
+          docker build -t mavenflow-frontend:dev .
+          kind load docker-image mavenflow-api:dev mavenflow-frontend:dev --name ci
+      - name: Deploy dev overlay
+        run: |
+          kubectl apply -k deploy/overlays/dev
+          kubectl -n mavenflow-dev rollout status statefulset/postgres --timeout=180s
+          kubectl -n mavenflow-dev rollout status deploy/mavenflow-api --timeout=180s
+          kubectl -n mavenflow-dev rollout status deploy/mavenflow-frontend --timeout=120s
+      - name: End-to-end test through the Services
+        run: |
+          kubectl -n mavenflow-dev port-forward svc/mavenflow-api 3001:3001 &
+          kubectl -n mavenflow-dev port-forward svc/mavenflow-frontend 8080:80 &
+          sleep 3
+          curl -sf localhost:8080/healthz
+          curl -sf localhost:8080/ | grep -q '<div id="root">'
+          ./scripts/smoke-test.sh http://localhost:3001
+      - name: Debug on failure
+        if: failure()
+        run: |
+          kubectl -n mavenflow-dev get pods -o wide
+          kubectl -n mavenflow-dev describe pods
+          kubectl -n mavenflow-dev logs -l app.kubernetes.io/name=mavenflow --all-containers --tail=100
+
+  release:
+    name: Push images & bump prod overlay (GitOps)
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [e2e]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # commit the new image tag
+      packages: write   # push to GHCR
+    env:
+      REGISTRY: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: backend
+          push: true
+          tags: ${{ env.REGISTRY }}-api:${{ github.sha }},${{ env.REGISTRY }}-api:latest
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: ${{ env.REGISTRY }}-frontend:${{ github.sha }},${{ env.REGISTRY }}-frontend:latest
+      - name: Point the prod overlay to the new images
+        working-directory: deploy/overlays/prod
+        run: |
+          kustomize edit set image \
+            "mavenflow-api=$REGISTRY-api:${{ github.sha }}" \
+            "mavenflow-frontend=$REGISTRY-frontend:${{ github.sha }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "deploy: prod images -> ${GITHUB_SHA::7} [skip ci]"
+          git push
