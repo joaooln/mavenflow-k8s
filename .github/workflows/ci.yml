@@ -77,7 +77,7 @@ jobs:
           done
 
   e2e:
-    name: Deploy to kind & end-to-end test
+    name: Deploy to kind via Argo CD & end-to-end test
     needs: [frontend, api, manifests]
     runs-on: ubuntu-latest
     steps:
@@ -90,11 +90,46 @@ jobs:
           docker build -t mavenflow-api:dev backend
           docker build -t mavenflow-frontend:dev .
           kind load docker-image mavenflow-api:dev mavenflow-frontend:dev --name ci
-      - name: Deploy dev overlay
+      - name: Install Argo CD
         run: |
-          kubectl apply -k deploy/overlays/dev
-          kubectl -n mavenflow-dev rollout status statefulset/postgres --timeout=180s
-          kubectl -n mavenflow-dev rollout status deploy/mavenflow-api --timeout=180s
+          kubectl create namespace argocd
+          kubectl apply -n argocd --server-side -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml"
+          kubectl -n argocd rollout status deploy/argocd-repo-server --timeout=300s
+          kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=300s
+        env:
+          ARGOCD_VERSION: v3.5.7
+      - name: Deploy the dev overlay through Argo CD (GitOps) at this commit
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: mavenflow-dev
+            namespace: argocd
+          spec:
+            project: default
+            source:
+              repoURL: https://github.com/${{ github.repository }}.git
+              targetRevision: ${{ github.event.pull_request.head.sha || github.sha }}
+              path: deploy/overlays/dev
+            destination:
+              server: https://kubernetes.default.svc
+              namespace: mavenflow-dev
+            syncPolicy:
+              automated: { prune: true, selfHeal: true }
+          EOF
+          kubectl -n argocd wait application/mavenflow-dev --for=jsonpath='{.status.sync.status}'=Synced --timeout=300s
+          kubectl -n argocd wait application/mavenflow-dev --for=jsonpath='{.status.health.status}'=Healthy --timeout=300s
+          kubectl -n argocd get application mavenflow-dev
+      - name: Prove self-healing (manual drift is reverted by Argo CD)
+        run: |
+          kubectl -n mavenflow-dev scale deploy/mavenflow-frontend --replicas=0
+          for i in $(seq 1 30); do
+            r=$(kubectl -n mavenflow-dev get deploy/mavenflow-frontend -o jsonpath='{.spec.replicas}')
+            [ "$r" = "1" ] && echo "Argo CD restored replicas to 1" && break
+            sleep 5
+          done
+          [ "$r" = "1" ]
           kubectl -n mavenflow-dev rollout status deploy/mavenflow-frontend --timeout=120s
       - name: End-to-end test through the Services
         run: |
@@ -107,6 +142,7 @@ jobs:
       - name: Debug on failure
         if: failure()
         run: |
+          kubectl -n argocd get application mavenflow-dev -o yaml | tail -40 || true
           kubectl -n mavenflow-dev get pods -o wide
           kubectl -n mavenflow-dev describe pods
           kubectl -n mavenflow-dev logs -l app.kubernetes.io/name=mavenflow --all-containers --tail=100

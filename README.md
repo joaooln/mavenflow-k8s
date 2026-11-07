@@ -27,7 +27,7 @@ flowchart LR
     ci --> fe[frontend build]
     ci --> api[API smoke test<br/>vs PostgreSQL service]
     ci --> man[kustomize build<br/>+ kubeconform]
-    fe & api & man --> e2e[kind cluster:<br/>deploy dev overlay<br/>+ end-to-end test]
+    fe & api & man --> e2e[kind cluster + Argo CD:<br/>GitOps sync of dev overlay,<br/>self-heal check, e2e test]
   end
   e2e --> rel[push images to GHCR<br/>tag = commit SHA]
   rel --> bump[CI commits new tag to<br/>deploy/overlays/prod]
@@ -60,6 +60,7 @@ flowchart LR
 | Security | Non-root containers, `readOnlyRootFilesystem` on the API, all capabilities dropped, seccomp `RuntimeDefault`, no service account token, NetworkPolicy isolating the database |
 | Secrets | Dev uses throwaway `secretGenerator` values; prod expects **Sealed Secrets** (nothing sensitive in Git) |
 | Delivery | Images tagged with the commit SHA; CI bumps the prod overlay, Argo CD syncs it |
+| GitOps tested in CI | Every run installs Argo CD in kind, lets it deploy the dev overlay from Git at that commit, then scales a Deployment by hand and checks that Argo CD reverts the drift |
 
 ## Repository layout
 
