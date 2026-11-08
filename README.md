@@ -20,6 +20,8 @@ cluster in CI, and Argo CD deploying whatever is on `main`.
 
 ## How a change reaches production
 
+![GitOps overview](docs/gitops-overview.png)
+
 ```mermaid
 flowchart LR
   dev[git push] --> ci[GitHub Actions]
